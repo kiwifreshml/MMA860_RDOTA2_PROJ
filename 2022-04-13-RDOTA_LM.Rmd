@@ -1,0 +1,422 @@
+---
+title: "MMA860_RDOTA2_Repo"
+author: "Lin Ma"
+date: "2022-03-22"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, echo=FALSE}
+knitr::opts_chunk$set(
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  cache=FALSE, 
+  fig.width = 5, 
+  fig.height = 4
+  )
+```
+
+
+```{r libraries}
+library(RDota2)
+library(data.table)
+
+library(tidyverse)
+library(readr)
+library(stringr)
+library(reshape2)
+library(readxl)
+library(pander)
+library(magrittr)
+library(forcats)
+library(data.table)
+library(grid)
+library(gridExtra)
+library(RColorBrewer)
+library(pheatmap)
+library(ggbeeswarm)
+
+library(ape)
+
+library(data.table)
+library(ComplexHeatmap)
+library(RColorBrewer)
+
+library(ggsci)
+
+library(viridis)
+library(lubridate)
+
+options(scipen=999)
+options(digits=12)
+panderOptions('knitr.auto.asis', FALSE)
+panderOptions('knitr.auto.asis', FALSE)
+panderOptions('digits', 6)
+panderOptions('round', 6)
+
+
+library(ggrepel)
+
+options(scipen=999)
+panderOptions('knitr.auto.asis', FALSE)
+
+specify_decimal <- function(x, k) as.numeric(trimws(format(round(x, k), nsmall=k)))
+```
+
+
+# Introduction
+
+- Data driven analysis is not make up something and try to let the data fit in. 
+- Overall terminology is to look at  descriptive figures and statistics of our data set and try to make assumptions based on the game regulations and competition experiences. 
+
+# Data Pre-processing
+
+The first step was done in another file, refer to the github link [1]
+
+## Load Data from Match ID: 3097027819
+
+We pre-parse all the matches with ID: 3097027819 ... ( what kind of data - two major teams with 114 heros in total; Game type; **Killing scores and it relevant assumption(We found that the killing score is not representing the final winning team); winner team (e.g Rwin - not necessary mean that the killing score is higher than the team; etc)
+
+```{r, echo=TRUE}
+mid = "3097027819"
+raw_game_data <- readRDS(paste0("RDS", mid)) %>%
+  dplyr::rename(game_id = mid)
+print(nrow(raw_game_data))
+```
+
+## Data Filtering 
+
+Add explanation here: by looking at the data, we observed ... we need to figure out the most played game type. since we have different strategy per game type within different hero selections. since Different Confounding factor involved. 
+
+```{r} 
+# only keep match with more than 900 seconds
+raw_game_data %<>% filter(duration >= 900) %>% unique()
+
+# Extract radiant info: to simplicity, ignore the player order. (from raw to Radiant wide with game information, including Rscore, Dscore, Rwin.etc )
+radiant_wide_df <- raw_game_data %>%
+  select(game_id, R1:R5) %>% 
+  gather(player_team, hero_id, R1:R5) %>% # wide to long 
+  mutate(player_team = 1) %>% 
+  spread(hero_id, player_team, fill = 0)  # long to wide
+colnames(radiant_wide_df) <- c("game_id", paste("R", setdiff(colnames(radiant_wide_df), "game_id"), sep=""))
+
+# Extract dire info
+dire_wide_df <-raw_game_data %>% 
+  select(game_id, D1:D5) %>% 
+  gather(player_team, hero_id, D1:D5) %>% # wide to long
+  mutate(player_team = 1) %>% 
+  spread(hero_id, player_team, fill = 0)  # long to wide
+colnames(dire_wide_df) <- c("game_id", paste("D", setdiff(colnames(dire_wide_df), "game_id"), sep=""))
+
+# Filter match data based on game type 
+raw_game_data %<>%
+  mutate(game_type = ifelse(lobby == 1 & gmode == 2, "PRO", NA)) %>%
+  mutate(game_type = ifelse(lobby == 7 & gmode == 2, "RCM", as.character(game_type))) %>%
+  mutate(game_type = ifelse(lobby == 7 & gmode == 22, "RAP", as.character(game_type))) %>%
+  mutate(game_type = ifelse(lobby == 7 & gmode == 3, "RRD", as.character(game_type)))
+raw_game_data %>%
+  dplyr::count(game_type) %>%
+  pander(caption = "match counts for different game types")
+
+# We only consider RAP game type
+raw_game_data %<>% filter(game_type == "RAP") %>% select(-game_type)
+print("the number of games left")
+print(nrow(raw_game_data))
+
+
+# Combine all the information via the unique ID: game_id
+game_data_df <- raw_game_data %>% 
+  select(game_id, duration, Rwin, Rscore, Dscore) %>%
+  mutate(Rwin = as.integer(Rwin)) %>%
+  left_join(radiant_wide_df, by=c("game_id")) %>% 
+  left_join(dire_wide_df, by=c("game_id")) %>%
+  mutate(Rwin_label = ifelse(Rwin == 1, "Radiat Win", "Dire Win"))
+```
+
+
+- **game_data_df**
+
+## The relationship between Rscore, Dscore, and Rwin
+
+GOAL: "we could convert our target variables into continuous value"
+
+To simplify our problem, we only consider the winning games `Rwin == 1` where `Rscore` > 'Dscore`, and there are 750 games not meeting our assumption, therefore not included in the following analysis.
+
+```{r}
+game_data_df
+
+game_data_df %>%
+  ggplot(aes(x = Dscore, y = Rscore, color = Rwin_label)) + 
+  geom_point(size = 1) + 
+  scale_color_lancet() + 
+  geom_abline(intercept = 0, slope = 1) + 
+  theme_bw()
+
+game_not_meet_assumption <- game_data_df %>% 
+  mutate(delta = ifelse(Rscore > Dscore, 1, 0)) %>%
+  filter(delta != Rwin)
+print(nrow(game_not_meet_assumption))
+
+
+game_data_df %<>% filter(!game_id %in% game_not_meet_assumption$game_id)
+print(nrow(game_data_df))
+```
+
+
+# Descriptive Statistics About Game Data Dataframe
+
+## Relationship between game duration and Rscore
+
+```{r}
+game_data_df %>% 
+  select(game_id, duration, Rscore) %>%
+  ggplot(aes(x = Rscore, y = duration)) + 
+  geom_point() +
+  theme_bw() + 
+  labs(x = "", y = "Game duration")
+```
+
+
+## Feature selection: select player basd on the accumulative winning game counts
+
+There are 114 heroes, each team select 5 heros at the beginning of the game. We start from looking at the attendance frequency of the heroes from both team. (Explanation needed) 
+
+```{r}
+attendence_df <- game_data_df %>%
+  filter(Rwin == 1) %>% #<--- only look at the game where Radiant win
+  gather(hero, attend, R1:R114) %>% group_by(hero) %>% summarise(total_winning_times = sum(attend)) 
+
+attendence_df %>%
+  ggplot(aes(x = total_winning_times)) + 
+  geom_histogram()+
+  geom_vline(xintercept = 400, color = "red") +
+  theme_bw() +
+  ggtitle("Hero attendence with Radiant win") + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+nheros <- nrow(attendence_df %>% filter(total_winning_times >= 400))
+top_radiants <- attendence_df %>% filter(total_winning_times >= 400) %>% .$hero
+attendence_df %>% filter(total_winning_times >= 400) %>% 
+  arrange(desc(total_winning_times)) %>% 
+  pander(caption = paste("There are", nheros, "heros attend more than 400 games in the current match when Radiant win"))
+```
+
+We also looked at the most frequent attendance of heroes with dire team win.
+
+```{r}
+attendence_df <- game_data_df %>% 
+  filter(Rwin == 0) %>%
+  gather(hero, attend, D1:D114) %>% group_by(hero) %>% summarise(total_winning_times = sum(attend)) 
+
+attendence_df %>%
+  ggplot(aes(x = total_winning_times)) + 
+  geom_histogram()+
+  geom_vline(xintercept = 400, color = "red") +
+  theme_bw() + 
+  ggtitle("Hero attendence with Dire win") + 
+  theme(plot.title = element_text(hjust = 0.5))
+ 
+nheros <- nrow(attendence_df %>% filter(total_winning_times >= 400))
+top_dires <- attendence_df %>% filter(total_winning_times >= 400) %>% .$hero
+attendence_df %>% filter(total_winning_times >= 400) %>% 
+  arrange(desc(total_winning_times)) %>% 
+  pander(caption = paste("There are", nheros, "heros attend more than 400 games in the current match when Radiant win"))
+```
+
+** conclusion ** 
+
+## Heatmap of all the heros with more than 400 winning games.
+
+```{r, fig.width=14, fig.height=8}
+top_gamers_df <- game_data_df %>% select(game_id, all_of(top_radiants), all_of(top_dires), Rwin_label) %>% 
+  arrange(Rwin_label)
+top_gamers_df
+
+top_gamers_mat <- top_gamers_df %>% select(-one_of(c("game_id", "Rwin_label"))) %>% as.matrix()
+rownames(top_gamers_mat) <- top_gamers_df$game_id
+
+game_annotation <- top_gamers_df %>% select(Rwin_label)
+rownames(game_annotation) <- top_gamers_df$game_id
+
+pheatmap(top_gamers_mat, color = c("white", "red"), show_rownames = F, breaks = c(0, 0.5, 1), annotation_row = game_annotation)
+```
+
+- rows and columns are clustered via hierarchical cluster. 
+And we don't observe any trend between the top 14 most frequent game winners and whether their teams win. 
+
+- note: from the heat map, we don't see a clear trend between Rwin/Rlose with the top games. Besides, we need to filter games with no top gamer attending, otherwise conflicting information.
+
+## Top gamers only 
+
+Filter out games with no top gamer attending.
+
+- top_gamers_df
+
+```{r}
+top_gamers_df <- game_data_df %>% select(game_id, all_of(top_radiants), all_of(top_dires), Rwin_label, Rscore, Dscore, duration) 
+top_gamers_df
+
+top_stats <- top_gamers_df %>% 
+  select(game_id:R74) %>%
+  gather(hero, attend, R104:R74) %>% 
+  group_by(game_id) %>% 
+  summarise(top_hero_counts = sum(attend)) %>% 
+  ungroup() 
+top_stats %>% ggplot(aes(x = top_hero_counts)) + 
+  geom_histogram() + theme_bw() + 
+  labs(x = "top hero attendence counts", y = "Radiant game counts")
+
+top_gamers_df %<>% filter(game_id %in% unique(top_stats %>% filter(top_hero_counts > 0) %>% .$game_id))
+
+print(nrow(top_gamers_df))
+```
+
+
+```{r}
+top_stats <- top_gamers_df %>% 
+  select(game_id, D104:D8) %>%
+  gather(hero, attend, D104:D8) %>% 
+  group_by(game_id) %>% 
+  summarise(top_hero_counts = sum(attend)) %>% 
+  ungroup() 
+top_stats %>% ggplot(aes(x = top_hero_counts)) + 
+  geom_histogram() + theme_bw() + 
+  labs(x = "top hero attendence counts", y = "Dire game counts")
+
+top_gamers_df %<>% filter(game_id %in% unique(top_stats %>% filter(top_hero_counts > 0) %>% .$game_id))
+
+```
+
+## Balanced data for the modeling
+
+```{r}
+top_gamers_df %>% 
+  dplyr::count(Rwin_label) %>% 
+  dplyr::rename(Game_counts = n) %>% 
+  pander(caption = "balanced data for the model")
+
+top_gamers_df %>% write.table("top_gamers_df.tsv", sep = "\t", quote = F, row.names = F)
+```
+
+- `top_gamers_df.tsv`
+
+# Linear Regression Model
+
+For the downstream analysis, we have 3010 games with balanced Rwin and Dwin. We also narrow down the games which meet the assumption that Rwin where `Rscore` > `Dscore`.
+
+## Simpler model 
+
+We start our modeling with only one target variable `duration` and predictor variable `Rscore`.
+
+Rscore = a + duration * b
+
+### Distribution of the match `duration`
+
+```{r, fig.width = 5, fig.height = 4}
+top_gamers_df %>%
+  ggplot(aes(x = duration/60)) + 
+  geom_histogram() +
+  labs(x = "Match duration (minuts)", y = "Match counts") + 
+  theme_bw() + 
+  ggtitle("Distributuion of match duration for\nmatch id: 3097027819") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+### Virsulisation of `duration` with `Rscore`
+
+```{r}
+top_gamers_df %>%
+  ggplot(aes( x= duration, y = Rscore)) + 
+  geom_point() + 
+  labs(x = "game duration (seconds)", y = "Rscore") + 
+  theme_bw()
+```
+
+### Linear Regression Modeling 
+
+Add explanation of LM result, refer to [2]
+
+```{r, echo =T}
+set.seed(101)
+lm.model.simple <- lm(formula = Rscore ~ duration, data = top_gamers_df)
+
+summary(lm.model.simple)
+```
+
+### Add linear regression back to the figure
+
+```{r}
+top_gamers_df %>%
+  ggplot(aes( x= duration, y = Rscore)) + 
+  geom_point() + 
+  labs(x = "game duration (seconds)", y = "Rscore") + 
+  theme_bw() + 
+  geom_abline(slope = coef(lm.model.simple)["duration"], intercept = coef(lm.model.simple)["(Intercept)"], color = "red")
+```
+
+
+## Linear regression with selected radint player
+
+### Heatmap of all the top most Radiant wining heros with more than 400 wining games.
+
+- red: in the game
+- white: not in the game
+
+Because we only looked at the top winning R gamers, not all the games would have all top heroes participants. Therefore we take a look at the heatmap first. 
+
+```{r, fig.width=14, fig.height=8}
+my_df <- top_gamers_df %>% select(game_id, all_of(top_radiants), Rwin_label) %>% 
+  arrange(Rwin_label)
+
+my_mat <- my_df %>% select(-one_of(c("game_id", "Rwin_label"))) %>% as.matrix()
+rownames(my_mat) <- my_df$game_id
+
+game_annotation <- my_df %>% select(Rwin_label)
+rownames(game_annotation) <- my_df$game_id
+
+pheatmap(my_mat, color = c("white", "red"), show_rownames = F, breaks = c(0, 0.5, 1), annotation_row = game_annotation)
+```
+
+### Pairwise correlation coefficient between R top gamers
+
+We can observe that the top R gamers participants are independent from each other [3]
+
+```{r correlation coefficient}
+library(corrplot)
+
+my_df <- top_gamers_df %>% 
+  select(R104:R8)
+corrplot(cor(my_df), method = 'number')
+```
+
+### Linear Regression Model
+
+Add explanation here. (Input - top heros selected and game duration; and their relationship with Rscore. game duration, and character of the heros- by name)
+
+```{r}
+set.seed(101)
+lm.model.selected.player <- lm(formula = Rscore ~ duration + R104 + R14 + R2 + R35 + R44 + R74 + R8, data = top_gamers_df)
+
+summary(lm.model.selected.player)
+```
+
+
+# References
+
+[1] https://github.com/chengjunhou/Tutorial/blob/master/rdota2/dota2_data_query.R
+
+[2] https://www.datacamp.com/community/tutorials/linear-regression-R
+
+[3] http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software
+
+[4] http://www.sthda.com/english/wiki/correlation-matrix-a-quick-start-guide-to-analyze-format-and-visualize-a-correlation-matrix-using-r-software
+
+[5] https://stats.stackexchange.com/questions/25804/why-would-r-return-na-as-a-lm-coefficient
+
+[6] https://stackoverflow.com/questions/7337761/linear-regression-na-estimate-just-for-last-coefficient
